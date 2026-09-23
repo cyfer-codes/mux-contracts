@@ -9,6 +9,7 @@
 //! Coverage:
 //! - mux-account: spend_limit validation, debit boundaries, delegate/session caps
 //! - mux-batcher: empty / oversized / in-bound batch sizes for execute_batch
+//! - mux-policy: spend window debit boundaries, window-reset boundary
 //! - shared: amount round-trip, address uniqueness, bytes length
 
 #[cfg(test)]
@@ -468,5 +469,91 @@ mod fuzz_batcher {
             client.try_submit_batch(&Vec::new(&env)),
             MuxBatcherError::EmptyBatch,
         );
+    }
+}
+
+/// mux-policy: daily spend window boundary and reset invariants.
+#[cfg(test)]
+mod fuzz_policy {
+    use mux_policy::{MuxPolicy, MuxPolicyClient, MuxPolicyError};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
+
+    fn setup() -> (Env, MuxPolicyClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MuxPolicy);
+        let client = MuxPolicyClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        (env, client, admin)
+    }
+
+    /// Invariant: record_spend within the configured daily limit succeeds;
+    /// a spend that would exceed the limit is rejected, for a sweep of
+    /// (limit, spend) pairs.
+    #[test]
+    fn spend_window_debit_boundaries() {
+        let cases: &[(i128, i128, bool)] = &[
+            (1000, 1, true),
+            (1000, 500, true),
+            (1000, 1000, true),
+            (1000, 1001, false),
+            (1, 1, true),
+            (1, 2, false),
+            (i128::MAX, 1, true),
+        ];
+
+        for &(limit, spend, expect_ok) in cases {
+            let (env, client, _) = setup();
+            let wallet = Address::generate(&env);
+            client.set_daily_limit(&wallet, &limit, &17_280_u32, &None);
+
+            let result = client.try_record_spend(&wallet, &spend);
+            if expect_ok {
+                assert!(
+                    result.is_ok(),
+                    "spend {spend} of limit {limit} should succeed: {result:?}"
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    Err(Ok(MuxPolicyError::LimitExceeded)),
+                    "spend {spend} of limit {limit} should exceed"
+                );
+            }
+        }
+    }
+
+    /// Invariant: the spend counter carries over right up to `reset_ledger`
+    /// and resets exactly at the boundary, across a sweep of window lengths.
+    #[test]
+    fn spend_window_resets_at_boundary() {
+        for &day_ledgers in &[1_u32, 10, 17_280, 100_000] {
+            let (env, client, _) = setup();
+            let wallet = Address::generate(&env);
+            client.set_daily_limit(&wallet, &1000_i128, &day_ledgers, &None);
+            client.record_spend(&wallet, &600_i128);
+
+            // One ledger before the window elapses: spend still accumulates
+            // in the same window, so a further 500 would exceed the limit.
+            env.ledger().with_mut(|l| l.sequence_number += day_ledgers - 1);
+            assert_eq!(
+                client.try_record_spend(&wallet, &500_i128),
+                Err(Ok(MuxPolicyError::LimitExceeded)),
+                "day_ledgers={day_ledgers}: spend should still be within the same window"
+            );
+
+            // At the window boundary: counter resets, so the same spend now succeeds.
+            env.ledger().with_mut(|l| l.sequence_number += 1);
+            let result = client.try_record_spend(&wallet, &500_i128);
+            assert!(
+                result.is_ok(),
+                "day_ledgers={day_ledgers}: spend after window reset should succeed: {result:?}"
+            );
+            assert_eq!(client.get_daily_limit(&wallet).spent, 500);
+        }
     }
 }

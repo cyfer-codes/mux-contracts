@@ -10,6 +10,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 mux-account = { path = "../contracts/mux-account", features = ["testutils"] }
 mux-batcher = { path = "../contracts/mux-batcher", features = ["testutils"] }
 mux-permissions = { path = "../contracts/mux-permissions", features = ["testutils"] }
+mux-policy = { path = "../contracts/mux-policy", features = ["testutils"] }
 soroban-test-helpers = { path = "../contracts/soroban-test-helpers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
