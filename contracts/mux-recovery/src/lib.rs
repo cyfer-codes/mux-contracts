@@ -495,6 +495,9 @@ impl MuxRecovery {
         Self::require_guardian(&env, &co_guardian)?;
 
         let mut request = Self::require_pending(&env)?;
+        if env.ledger().sequence() >= request.expires_at {
+            return Err(RecoveryError::RecoveryExpired);
+        }
         let new_owner = request.new_owner.clone();
         request.status = RecoveryStatus::Executed;
         env.storage().instance().set(&DataKey::Owner, &new_owner);
