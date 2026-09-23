@@ -439,4 +439,34 @@ mod fuzz_batcher {
             MuxBatcherError::EmptyBatch,
         );
     }
+
+    /// Invariant: `submit_batch` (the self-invoking convenience wrapper) mirrors
+    /// the `execute_batch` size gate for a sweep of oversized lengths.
+    #[test]
+    fn submit_batch_oversized_gate_holds() {
+        let (env, client, _) = setup();
+        env.budget().reset_unlimited();
+
+        for n in [MAX_BATCH_SIZE + 1, MAX_BATCH_SIZE + 5, 100_u32, 255] {
+            let ops = make_ops(&env, n);
+            assert_contract_err(
+                client.try_submit_batch(&ops),
+                MuxBatcherError::BatchTooLarge,
+            );
+        }
+
+        for n in [1_u32, 2, 10, MAX_BATCH_SIZE] {
+            let ops = make_ops(&env, n);
+            let result = client.try_submit_batch(&ops);
+            assert!(
+                result.is_ok(),
+                "submit_batch ops_count={n} should pass the size gate: {result:?}"
+            );
+        }
+
+        assert_contract_err(
+            client.try_submit_batch(&Vec::new(&env)),
+            MuxBatcherError::EmptyBatch,
+        );
+    }
 }
