@@ -7,6 +7,12 @@ on:
       - 'bindings/**'
       - 'contracts/**'
       - '.github/workflows/bindings.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bindings/**'
+      - 'contracts/**'
+      - '.github/workflows/bindings.yml'
   workflow_dispatch:
 
 concurrency:
