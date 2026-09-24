@@ -30,6 +30,77 @@ See [event-topic-conventions.md](event-topic-conventions.md) for naming rules, t
 
 ---
 
+## Audit correlation fields
+
+Every audit event carries a set of **correlation fields** so that off-chain
+consumers can group, order, and verify events without trusting the indexer.
+These fields are part of the event contract and are covered by the invariants
+below.
+
+### Correlation fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `correlation_id` | `BytesN<32>` | Stable identifier for the logical operation. Deterministic per `(contract_tag, action, caller, nonce)`; identical across every event emitted by the same top-level call. |
+| `sequence` | `u64` | Monotonic per-contract counter, incremented once per emitted event. Never reused, never decreases. |
+| `parent_id` | `Option<BytesN<32>>` | `correlation_id` of the enclosing call when this event is emitted from a nested/child invocation; `None` for top-level events. |
+| `prev_hash` | `BytesN<32>` | Hash of the previous event's `(correlation_id, sequence, action, data)` tuple for this contract. `None`-equivalent (all-zero) for the first event. |
+
+### Invariants
+
+1. **Stable correlation IDs.** For a given top-level call, `correlation_id` is
+   computed once and reused verbatim by every event the call emits. It is a
+   pure function of `(contract_tag, action, caller, nonce)` and MUST NOT depend
+   on wall-clock time, ledger sequence, or any value that can differ between
+   simulation and execution.
+2. **Monotonic sequencing.** `sequence` is a per-contract `u64` stored in
+   instance storage, incremented exactly once per emitted event. It is strictly
+   increasing and gap-free within a contract; a replayed or failed call MUST
+   NOT advance it.
+3. **Tamper-evident linkage.** `prev_hash` chains each event to its predecessor
+   via `SHA-256(correlation_id || sequence || action || data)`. A consumer that
+   has any trusted event can recompute the chain forward and detect insertion,
+   reordering, or deletion.
+4. **Fail-closed emission.** If any correlation field cannot be computed (e.g.
+   storage read fails), the emitting call MUST abort rather than publish an
+   event with a missing or defaulted field.
+
+### Idempotency
+
+Audit submissions are idempotent on `correlation_id`. A repeated submission
+with the same `correlation_id` is a no-op: it MUST NOT emit a second event and
+MUST NOT advance `sequence`. Concurrent submissions are serialized by the
+per-contract `sequence` counter; the loser of the race observes the winner's
+`correlation_id` and returns the existing event reference instead of writing.
+
+### Failure modes
+
+- **Dependency outage (RPC/DB/Horizon).** Writes fail closed: if the audit
+  sink is unreachable, the state-mutating call reverts. Reads may degrade to
+  cached data but MUST surface a stale marker.
+- **Auth expiry / wrong role / revoked delegate.** Authorization is checked
+  before any correlation field is computed; denied calls emit no event and do
+  not advance `sequence`.
+- **Adversarial input.** Oversized batches are rejected before emission;
+  spoofed `correlation_id` values that do not match the recomputed hash are
+  rejected. Rate limits apply per caller.
+
+### Authorization
+
+Emitting audit events is a privileged surface. Deny-by-default: only the
+contract owner, an unexpired delegate with the `audit` permission, or a
+caller presenting a valid API key/JWT bound to the contract may trigger
+emission. Guardians may pause emission but cannot forge events.
+
+### Observability
+
+Emission failures log a stable error code (`AUDIT_CORRELATION_MISSING`,
+`AUDIT_SEQUENCE_REGRESSION`, `AUDIT_CHAIN_MISMATCH`) with the offending
+`correlation_id` and `sequence`. Logs MUST NOT contain raw key material,
+JWTs, or webhook secrets — redact before logging.
+
+---
+
 ## mux-account events
 
 Contract tag: `mux_acct`
@@ -233,9 +304,15 @@ Contract tag: `mux_bat`
 | `executed` | `execute_batch` completes (success or partial failure) | `(caller: Address, success_count: u32, failure_count: u32)` |
 | `bat_ok` | `execute_batch` completes with zero failures | `(caller: Address, success_count: u32)` |
 | `bat_abort` | A `require_success=true` operation fails | `caller: Address` |
-| `sim_done` | `simulate_batch` completes successfully | `(caller: Address, success_count: u32)` |
+| `sim_done` | `si
 
-> `simulate_batch` writes no state but does emit `sim_done` for off-chain
+|---|
+| `init` | `initialize` succeeds | `admin: Address` |
+| `bat_start` | `execute_batch` begins, before any operation runs | `(caller: Address, op_count: u32)` |
+| `executed` | `execute_batch` completes (success or partial failure) | `(caller: Address, success_count: u32, failure_count: u32)` |
+| `bat_ok` | `execute_batch` completes with zero failures | `(caller: Address, success_count: u32)` |
+| `bat_abort` | A `require_success=true` operation fails | `caller: Address` |
+| `sim_done` | `simulate_batch` writes no state but does emit `sim_done` for off-chain
 > observability. `upgrade` emits no event — see the note under
 > mux-permissions above; the same convention applies here. `initialize` is
 > optional and only establishes the `upgrade()` admin — batching itself

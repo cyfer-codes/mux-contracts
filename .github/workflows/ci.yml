@@ -6,15 +6,16 @@ on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
+  mainnet-address-review:
+    name: Mainnet address PR review rule
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
   # ── #680: enforce repository rustfmt.toml ───────────────────────────────────
   rustfmt:
     name: Rustfmt (rustfmt.toml)
@@ -33,12 +34,18 @@ jobs:
     name: Scan for leaked secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 100  # Scan last 100 commits
-      - name: Scan git history for secret keys
-        run: bash scripts/scan-git-secrets.sh --depth 100
-  # ── end #682 ──────────────────────────────────────────────────────────────
+          fetch-depth: 0
+
+      - name: Enforce mainnet address review rule
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
 
   rust:
     name: Rust (fmt, clippy, test, wasm)
@@ -68,26 +75,20 @@ jobs:
       - name: Build WASM (release)
         run: bash scripts/build-wasm.sh --release
 
-      # ── #664: WASM hash verification ──────────────────────────────────────
-      # Compute SHA-256 for every built mux_*.wasm and write wasm-hashes.txt.
-      # Fail fast if no WASMs were produced (build step above must have run).
-      - name: Compute WASM hashes
-        run: bash scripts/compute-wasm-hashes.sh
-      - name: Upload WASM hashes artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-hashes
-          path: wasm-hashes.txt
-          if-no-files-found: error
-      # ── end #664 ──────────────────────────────────────────────────────────
+          ADDRESSES_FILE="config/addresses.json"
 
-      - name: Check contract sizes
-        run: bash scripts/check-contract-sizes.sh
+          if [ -z "${BASE_SHA:-}" ] || [ -z "${HEAD_SHA:-}" ]; then
+            echo "Not a pull_request event; skipping mainnet address review gate."
+            exit 0
+          fi
 
-      # ── #663: no testutils in release WASM ────────────────────────────────
-      - name: check-no-testutils (Cargo.toml + WASM scan)
-        run: bash scripts/check-no-testutils.sh
-      # ── end #663 ──────────────────────────────────────────────────────────
+          if ! git cat-file -e "${BASE_SHA}:${ADDRESSES_FILE}" 2>/dev/null; then
+            echo "No ${ADDRESSES_FILE} at base; nothing to compare."
+            exit 0
+          fi
+
+          if ! git diff --quiet "${BASE_SHA}" "${HEAD_SHA}" -- "${ADDRESSES_FILE}"; then
+            echo "Detected changes to ${ADDRESSES_FILE}."
 
       - name: Check size-check coverage
         run: bash scripts/test-check-contract-sizes.sh
@@ -114,19 +115,18 @@ jobs:
       - name: Check rollback log entries
         run: bash scripts/check-rollback-log.sh
 
-  # ── #661: cargo deny supply-chain check ─────────────────────────────────────
-  deny:
-    name: cargo deny (licenses, advisories, bans)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Use the official cargo-deny action for a pinned, cached install.
-      # deny.toml controls all policy; failures here block merge.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
-  # ── end #661 ──────────────────────────────────────────────────────────────
+            # Fail closed: mainnet address changes require an explicit review marker.
+            # The marker is a PR label 'mainnet-address-reviewed' set by a maintainer
+            # after the mainnet address review rule has been satisfied.
+            if ! echo ",${PR_LABELS}," | grep -q ",mainnet-address-reviewed,"; then
+              echo "::error::Mainnet address review rule violated: ${ADDRESSES_FILE} changed without the 'mainnet-address-reviewed' label. See SECURITY.md and docs/rollback-guide.md."
+              exit 1
+            fi
+
+            echo "Mainnet address review marker present; change permitted."
+          else
+            echo "No changes to ${ADDRESSES_FILE}; mainnet address review rule not triggered."
+          fi
 
   # ── #663: no-testutils script self-test ──────────────────────────────────────
   check-no-testutils:

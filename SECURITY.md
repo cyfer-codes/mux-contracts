@@ -64,6 +64,22 @@ We will not pursue legal action against researchers who follow these guidelines.
 
 See [docs/threat-model.md](docs/threat-model.md) for the current threat model, trust boundaries, and known mitigations.
 
+## Partial Crate Rollback
+
+Partial rollback is a privileged, money-path-adjacent surface. It is authorized
+server-side (owner/delegate/guardian/API-key/JWT), deny-by-default, idempotent via
+correlation ids, and fails closed on RPC/DB/Horizon outages. Rollback logs redact
+keys, JWTs, and webhook secrets. See [docs/rollback-guide.md](docs/rollback-guide.md)
+for invariants, stable error codes, and the flag/kill-switch strategy.
+
+## Account Abstraction (AA)
+
+The AA roadmap invariants, authorization model (owner/delegate/guardian/API-key/JWT),
+stable error codes, idempotency, and fail-closed requirements are defined in
+[docs/aa-milestone-roadmap.md](docs/aa-milestone-roadmap.md). That document is the
+authoritative exit-criteria reference for AA work; report AA-related issues against
+its invariants.
+
 ## Audit History
 
 See [docs/audit-prep.md](docs/audit-prep.md) for audit preparation notes and the [docs/access-control-checklist.md](docs/access-control-checklist.md) for the access control review checklist.
